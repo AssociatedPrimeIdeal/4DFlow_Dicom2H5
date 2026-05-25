@@ -295,48 +295,104 @@ def check_flow_file_core(file, manuf):
 
 
 def check_flow_file_core_group_dcm(file, manuf):
+
     ds = pydicom.dcmread(file)
     data_array = ds.pixel_array
 
-    rr_interval = None
-    if hasattr(ds, "HeartRate"):
-        heart_rate = ds.HeartRate
-        rr_interval = 60000 / heart_rate
-    elif hasattr(ds, "CardiacRate"):
-        heart_rate = ds.CardiacRate
-        rr_interval = 60000 / heart_rate
-    elif hasattr(ds, "CardiacRRIntervalSpecified"):
-        rr_interval = ds.CardiacRRIntervalSpecified
+    venc_pair=None
 
-    resolution = None
+    rr_interval=None
+
+    if hasattr(ds,"HeartRate"):
+        rr_interval=60000/ds.HeartRate
+
+    elif hasattr(ds,"CardiacRate"):
+        rr_interval=60000/ds.CardiacRate
+
+    elif hasattr(ds,"CardiacRRIntervalSpecified"):
+        rr_interval=ds.CardiacRRIntervalSpecified
+
+    resolution=None
+
     if "siemens" in manuf.lower():
-        image_type = ds.ImageType
-        dsp = ds.PerFrameFunctionalGroupsSequence[-1]
-        nv = 0
 
-        pix_spacing_x = dsp.PixelMeasuresSequence[0].PixelSpacing[0]
-        pix_spacing_y = dsp.PixelMeasuresSequence[0].PixelSpacing[1]
-        thickness = dsp.PixelMeasuresSequence[0].SliceThickness
-        resolution = (pix_spacing_x, pix_spacing_y, thickness)
-        venc_pair = None
-        if image_type[2] == "VELOCITY":
-            venc = dsp.MRVelocityEncodingSequence[0].VelocityEncodingMaximumValue
-            venc_dir = dsp.MRVelocityEncodingSequence[0].VelocityEncodingDirection
-            nv = np.argmax(np.abs(venc_dir)) + 1
-            venc_pair = (nv, abs(venc))
-        slope = dsp.PixelValueTransformationSequence[0].RescaleSlope
-        intercept = dsp.PixelValueTransformationSequence[0].RescaleIntercept
-        slice_location = dsp.FrameContentSequence[0].InStackPositionNumber
-        data = (data_array * slope + intercept) / intercept * venc if nv else (data_array * slope + intercept)
-        return nv, slice_location, data, rr_interval, resolution, venc_pair
+        image_type=ds.ImageType
 
-    if "philips" in manuf.lower():
-        return None, None, None, None, None, None
-    if "ge" in manuf.lower():
-        return None, None, None, None, None, None
-    return None, None, None, None, None, None
+        dsp=ds.PerFrameFunctionalGroupsSequence[-1]
 
+        pix_spacing_x=(
+            dsp.PixelMeasuresSequence[0]
+            .PixelSpacing[0]
+        )
 
+        pix_spacing_y=(
+            dsp.PixelMeasuresSequence[0]
+            .PixelSpacing[1]
+        )
+
+        thickness=(
+            dsp.PixelMeasuresSequence[0]
+            .SliceThickness
+        )
+
+        resolution=(
+            pix_spacing_x,
+            pix_spacing_y,
+            thickness
+        )
+
+        nv=0
+
+        if image_type[2]=="VELOCITY":
+
+            venc=(
+                dsp.MRVelocityEncodingSequence[0]
+                .VelocityEncodingMaximumValue
+            )
+
+            venc_dir=(
+                dsp.MRVelocityEncodingSequence[0]
+                .VelocityEncodingDirection
+            )
+
+            nv=np.argmax(
+                np.abs(venc_dir)
+            )+1
+
+            venc_pair=(
+                nv,
+                abs(float(venc))
+            )
+
+        slope=(
+            dsp.PixelValueTransformationSequence[0]
+            .RescaleSlope
+        )
+
+        intercept=(
+            dsp.PixelValueTransformationSequence[0]
+            .RescaleIntercept
+        )
+
+        slice_location=(
+            dsp.FrameContentSequence[0]
+            .InStackPositionNumber
+        )
+
+        data=(
+            data_array*slope+intercept
+        )
+
+        return (
+            nv,
+            slice_location,
+            data,
+            rr_interval,
+            resolution,
+            venc_pair
+        )
+
+    return None,None,None,None,None,None
 def check_flow_file_core_group_dcm2(file, manuf):
     ds = pydicom.dcmread(file)
     data_array = ds.pixel_array
@@ -387,132 +443,436 @@ def check_flow_file_core_group_dcm2(file, manuf):
         return None, None, None, None, None
     return None, None, None, None, None
 
+def get_flow_data(
+        flow_dcm_files,
+        manuf,
+        group_dcm
+):
 
-def get_flow_data(flow_dcm_files, manuf, group_dcm):
-    rr_values = []
-    resolutions = []
-    venc_list = []
-    if group_dcm == 0:
-        flow_data = [[] for _ in range(5)]
-        spe_values = [[] for _ in range(5)]
-        nt_values = [[] for _ in range(5)]
+    rr_values=[]
 
-        with ProcessPoolExecutor() as executor:
-            results = list(
-                tqdm(executor.map(check_flow_file_core, flow_dcm_files, [manuf] * len(flow_dcm_files)), total=len(flow_dcm_files))
-            )
+    resolutions=[]
 
-        for nv, slice_location, trigger_time, data, rr_interval, res, venc_pair in results:
-            if nv is not None:
-                spe_values[nv].append(slice_location)
-                nt_values[nv].append(trigger_time)
-                flow_data[nv].append(data)
-                venc_list.append(venc_pair)
-                if rr_interval is not None and rr_interval not in rr_values:
-                    rr_values.append(rr_interval)
-                if res is not None and tuple(res) not in resolutions:
-                    resolutions.append(tuple(res))
+    venc_list=[]
 
-        didx = next(i for i in range(5) if len(flow_data[i]) == 0)
-        del flow_data[didx], spe_values[didx], nt_values[didx]
-        for i in range(len(spe_values)):
-            paired = list(zip(spe_values[i], nt_values[i], flow_data[i]))
-            paired.sort(key=lambda x: (x[0], x[1]))
-            spe_values[i], nt_values[i], flow_data[i] = zip(*paired) if paired else ([], [], [])
-            flow_data[i] = np.array(flow_data[i])
-        flow_data = np.array(flow_data)
-        flow_data = flow_data.reshape(-1, len(set(spe_values[0])), len(set(nt_values[0])), *(flow_data.shape[-2:]))
-        flow_data = np.transpose(flow_data, (3, 4, 1, 2, 0))
+    if group_dcm==0:
 
-    elif group_dcm == 1:
-        flow_data = [[] for _ in range(4)]
-        spe_values = [[] for _ in range(4)]
+        flow_data=[[] for _ in range(5)]
+
+        spe_values=[[] for _ in range(5)]
+
+        nt_values=[[] for _ in range(5)]
 
         with ProcessPoolExecutor() as executor:
-            results = list(
+
+            results=list(
                 tqdm(
-                    executor.map(check_flow_file_core_group_dcm, flow_dcm_files, [manuf] * len(flow_dcm_files)),
-                    total=len(flow_dcm_files),
+                    executor.map(
+                        check_flow_file_core,
+                        flow_dcm_files,
+                        [manuf]*len(flow_dcm_files)
+                    ),
+                    total=len(flow_dcm_files)
                 )
             )
 
-        for nv, slice_location, data, rr_interval, res, venc_pair in results:
-            if nv is not None:
-                spe_values[nv].append(slice_location)
-                flow_data[nv].append(data)
-                venc_list.append(venc_pair)
-                if rr_interval is not None and rr_interval not in rr_values:
-                    rr_values.append(rr_interval)
-                if res is not None and tuple(res) not in resolutions:
-                    resolutions.append(tuple(res))
+        for nv,slice_location,\
+            trigger_time,data,\
+            rr_interval,res,\
+            venc_pair in results:
 
-        for i in range(len(spe_values)):
-            paired = list(zip(spe_values[i], flow_data[i]))
-            paired.sort(key=lambda x: x[0])
-            spe_values[i], flow_data[i] = zip(*paired) if paired else ([], [])
-            flow_data[i] = np.array(flow_data[i])
-        flow_data = np.array(flow_data)
-        flow_data = flow_data.reshape(-1, len(set(spe_values[0])), *(flow_data.shape[-3:]))
-        flow_data = np.transpose(flow_data, (3, 4, 1, 2, 0))
-    elif group_dcm == 2:
-        flow_data = [[] for _ in range(4)]
-        with ProcessPoolExecutor() as executor:
-            results = list(
-                tqdm(
-                    executor.map(check_flow_file_core_group_dcm2, flow_dcm_files, [manuf] * len(flow_dcm_files)),
-                    total=len(flow_dcm_files),
+            if nv is None:
+                continue
+
+            spe_values[nv].append(
+                slice_location
+            )
+
+            nt_values[nv].append(
+                trigger_time
+            )
+
+            flow_data[nv].append(
+                data
+            )
+
+            venc_list.append(
+                venc_pair
+            )
+
+            if rr_interval is not None:
+                if rr_interval not in rr_values:
+                    rr_values.append(
+                        rr_interval
+                    )
+
+            if res is not None:
+                if tuple(res) not in resolutions:
+                    resolutions.append(
+                        tuple(res)
+                    )
+
+        didx=next(
+            i for i in range(5)
+            if len(flow_data[i])==0
+        )
+
+        del flow_data[didx]
+        del spe_values[didx]
+        del nt_values[didx]
+
+        for i in range(len(flow_data)):
+
+            paired=list(
+                zip(
+                    spe_values[i],
+                    nt_values[i],
+                    flow_data[i]
                 )
             )
 
-        for nv, data, rr_interval, res, venc_pair in results:
-            if nv is not None:
-                flow_data[nv].append(data)
-                venc_list.append(venc_pair)
-                if rr_interval is not None and rr_interval not in rr_values:
-                    rr_values.append(rr_interval)
-                if res is not None and tuple(res) not in resolutions:
-                    resolutions.append(tuple(res))
-        flow_data = np.array(flow_data)[:, 0]
-        flow_data = np.transpose(flow_data, (3, 4, 1, 2, 0))
+            paired.sort(
+                key=lambda x:
+                (x[0],x[1])
+            )
+
+            spe_values[i],\
+            nt_values[i],\
+            flow_data[i]=zip(*paired)
+
+            flow_data[i]=np.array(
+                flow_data[i]
+            )
+
+        flow_data=np.array(
+            flow_data
+        )
+
+        flow_data=flow_data.reshape(
+            -1,
+            len(set(
+                spe_values[0]
+            )),
+            len(set(
+                nt_values[0]
+            )),
+            *flow_data.shape[-2:]
+        )
+
+        flow_data=np.transpose(
+            flow_data,
+            (3,4,1,2,0)
+        )
+
+
+    elif group_dcm==1:
+
+        flow_dict={}
+        spe_dict={}
+
+        with ProcessPoolExecutor() as executor:
+
+            results=list(
+                tqdm(
+                    executor.map(
+                        check_flow_file_core_group_dcm,
+                        flow_dcm_files,
+                        [manuf]*len(flow_dcm_files)
+                    ),
+                    total=len(
+                        flow_dcm_files
+                    )
+                )
+            )
+
+        for nv,\
+            slice_location,\
+            data,\
+            rr_interval,\
+            res,\
+            venc_pair in results:
+
+            if nv is None:
+                continue
+
+            if venc_pair is None:
+
+                key=(0,0)
+
+            else:
+
+                key=venc_pair
+
+            if key not in flow_dict:
+
+                flow_dict[key]=[]
+
+                spe_dict[key]=[]
+
+            flow_dict[key].append(
+                data
+            )
+
+            spe_dict[key].append(
+                slice_location
+            )
+
+            venc_list.append(
+                venc_pair
+            )
+
+            if rr_interval is not None:
+
+                if rr_interval not in rr_values:
+
+                    rr_values.append(
+                        rr_interval
+                    )
+
+            if res is not None:
+
+                if tuple(res) not in resolutions:
+
+                    resolutions.append(
+                        tuple(res)
+                    )
+
+        ordered_keys=sorted(
+            flow_dict.keys(),
+            key=lambda x:
+            (x[0],x[1])
+        )
+
+        final_data=[]
+
+        for key in ordered_keys:
+
+            paired=list(
+                zip(
+                    spe_dict[key],
+                    flow_dict[key]
+                )
+            )
+
+            paired.sort(
+                key=lambda x:
+                x[0]
+            )
+
+            _,arr=zip(
+                *paired
+            )
+
+            arr=np.array(
+                arr
+            )
+
+            print(
+                key,
+                arr.shape
+            )
+
+            final_data.append(
+                arr
+            )
+
+        min_n=min(
+            x.shape[0]
+            for x in final_data
+        )
+
+        final_data=[
+            x[:min_n]
+            for x in final_data
+        ]
+
+        flow_data=np.stack(
+            final_data,
+            axis=0
+        )
+
+        flow_data=np.transpose(
+            flow_data,
+            (3,4,1,2,0)
+        )
+
+
+    elif group_dcm==2:
+
+        flow_data=[[] for _ in range(4)]
+
+        with ProcessPoolExecutor() as executor:
+
+            results=list(
+                tqdm(
+                    executor.map(
+                        check_flow_file_core_group_dcm2,
+                        flow_dcm_files,
+                        [manuf]*len(flow_dcm_files)
+                    ),
+                    total=len(
+                        flow_dcm_files
+                    )
+                )
+            )
+
+        for nv,data,\
+            rr_interval,\
+            res,\
+            venc_pair in results:
+
+            if nv is None:
+                continue
+
+            flow_data[nv].append(
+                data
+            )
+
+            venc_list.append(
+                venc_pair
+            )
+
+        flow_data=np.array(
+            flow_data
+        )[:,0]
+
+        flow_data=np.transpose(
+            flow_data,
+            (3,4,1,2,0)
+        )
+
     else:
-        raise ValueError(f"Unsupported GroupDCM value: {group_dcm}")
 
-    final_rr = rr_values[0] if rr_values else None
-    final_res = resolutions[0] if resolutions else (None, None, None)
+        raise ValueError
 
-    aggregated = {}
+
+    final_rr=(
+        rr_values[0]
+        if rr_values
+        else None
+    )
+
+    final_res=(
+        resolutions[0]
+        if resolutions
+        else (None,None,None)
+    )
+
+    aggregated={}
+
     for item in venc_list:
-        if item is not None:
-            key = item[0]
-            value = item[1]
-            if key not in aggregated:
-                aggregated[key] = value
-    venc_list = [(key, aggregated[key]) for key in sorted(aggregated.keys())]
-    venc_list = [venc_list[0][1], venc_list[1][1], venc_list[2][1]]
-    return flow_data, final_rr, final_res, venc_list
+
+        if item is None:
+            continue
+
+        nv=item[0]
+
+        venc=item[1]
+
+        if nv not in aggregated:
+
+            aggregated[nv]=[]
+
+        if venc not in aggregated[nv]:
+
+            aggregated[nv].append(
+                venc
+            )
+
+    venc_output=[]
+
+    for k in sorted(
+        aggregated.keys()
+    ):
+
+        venc_output.append(
+            sorted(
+                aggregated[k]
+            )
+        )
+
+    return (
+        flow_data,
+        final_rr,
+        final_res,
+        venc_output
+    )
 
 
-def write_h5_group(h5_file, key, flow_files, flow_data, rr_interval, resolution, venc_list):
-    group = h5_file.create_group(str(key))
-    group.create_dataset("img", data=flow_data)
-    group.create_dataset("Paths", data=[path.encode("utf-8") for path in flow_files])
+def write_h5_group(
+        h5_file,
+        key,
+        flow_files,
+        flow_data,
+        rr_interval,
+        resolution,
+        venc_list
+):
 
-    if rr_interval is not None:
-        group.create_dataset("RR", data=rr_interval)
+    group=h5_file.create_group(
+        str(key)
+    )
+
+    group.create_dataset(
+        "img",
+        data=flow_data
+    )
+
+    group.create_dataset(
+        "Paths",
+        data=[
+            p.encode("utf-8")
+            for p in flow_files
+        ]
+    )
+
+    if rr_interval is None:
+
+        group.create_dataset(
+            "RR",
+            data=np.nan
+        )
+
     else:
-        group.create_dataset("RR", data=np.nan)
 
-    if resolution and all(r is not None for r in resolution):
-        group.create_dataset("Resolution", data=np.array(resolution, dtype=np.float32))
+        group.create_dataset(
+            "RR",
+            data=rr_interval
+        )
+
+    if resolution:
+
+        group.create_dataset(
+            "Resolution",
+            data=np.array(
+                resolution,
+                dtype=np.float32
+            )
+        )
+
     else:
-        group.create_dataset("Resolution", data=np.array([np.nan, np.nan, np.nan], dtype=np.float32))
 
-    if venc_list is not None:
-        group.create_dataset("Venc", data=np.array(venc_list, dtype=np.float32))
-    else:
-        group.create_dataset("Venc", data=np.array([np.nan, np.nan, np.nan], dtype=np.float32))
+        group.create_dataset(
+            "Resolution",
+            data=np.array(
+                [np.nan]*3,
+                dtype=np.float32
+            )
+        )
 
+    venc_flat=[]
 
+    for x in venc_list:
+
+        venc_flat.extend(x)
+
+    group.create_dataset(
+        "Venc",
+        data=np.array(
+            venc_flat,
+            dtype=np.float32
+        )
+    )
 def convert_dicom_to_h5(dicom_path, data_save_path):
     dcm_files = get_filtered_dcm_files(dicom_path)
     manuf = check_manufacturer(dcm_files)
