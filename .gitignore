@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+.Python
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/

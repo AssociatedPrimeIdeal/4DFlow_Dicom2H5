@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dicom2h5"
+version = "0.1.0"
+description = "Convert 4D flow MRI DICOM series to HDF5 files."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Yuyang Ren"},
+]
+dependencies = [
+  "h5py",
+  "numpy",
+  "pydicom",
+  "tqdm",
+]
+
+[project.scripts]
+dicom2h5 = "dicom2h5.converter:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
