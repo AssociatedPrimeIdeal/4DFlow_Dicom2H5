@@ -146,20 +146,6 @@ def axis_name_to_nv(axis_name):
     return mapping.get(axis_name)
 
 
-def venc_axis_to_name(nv):
-    mapping = {
-        1: "LR",
-        2: "AP",
-        3: "FH",
-    }
-    return mapping.get(int(nv))
-
-
-def create_string_dataset(group, name, values):
-    string_dtype = h5py.string_dtype(encoding="utf-8")
-    group.create_dataset(name, data=np.array(values, dtype=object), dtype=string_dtype)
-
-
 def extract_rr_interval(ds):
     if hasattr(ds, "HeartRate"):
         return 60000 / float(ds.HeartRate)
@@ -584,9 +570,6 @@ def update_metadata(metadata, record):
     if resolution is not None and tuple(resolution) not in metadata["resolutions"]:
         metadata["resolutions"].append(tuple(resolution))
 
-    if metadata["spatial_order"] is None:
-        metadata["spatial_order"] = infer_spatial_order_from_orientation(record.get("orientation"))
-
 
 def build_single_frame_channels(records, metadata):
     channel_entries = {}
@@ -681,8 +664,7 @@ def build_channel_layout(channel_arrays):
     if not ordered_keys:
         ordered_keys = list(channel_arrays.keys())
 
-    venc_order = [venc_axis_to_name(axis) or "" for axis in AXIS_ORDER]
-    return ordered_keys, venc_order, venc_values
+    return ordered_keys, venc_values
 
 
 def stack_flow_data(channel_arrays, ordered_keys):
@@ -694,7 +676,6 @@ def get_flow_data(flow_dcm_files, manuf, group_dcm):
     metadata = {
         "rr_values": [],
         "resolutions": [],
-        "spatial_order": None,
     }
 
     if group_dcm == 0:
@@ -729,16 +710,16 @@ def get_flow_data(flow_dcm_files, manuf, group_dcm):
 
     if not channel_arrays:
         empty_resolution = (None, None, None)
-        return np.array([]), None, empty_resolution, metadata["spatial_order"], ["", "", ""], []
+        return np.array([]), None, empty_resolution, []
 
-    ordered_keys, venc_order, venc_values = build_channel_layout(channel_arrays)
+    ordered_keys, venc_values = build_channel_layout(channel_arrays)
     flow_data = stack_flow_data(channel_arrays, ordered_keys)
     final_rr = metadata["rr_values"][0] if metadata["rr_values"] else None
     final_resolution = metadata["resolutions"][0] if metadata["resolutions"] else (None, None, None)
-    return flow_data, final_rr, final_resolution, metadata["spatial_order"], venc_order, venc_values
+    return flow_data, final_rr, final_resolution, venc_values
 
 
-def write_h5_group(h5_file, key, flow_data, rr_interval, resolution, spatial_order, venc_order, venc_values):
+def write_h5_group(h5_file, key, flow_data, rr_interval, resolution, venc_values):
     group = h5_file.create_group(str(key))
     group.create_dataset("img", data=flow_data)
     group.create_dataset("RR", data=rr_interval if rr_interval is not None else np.nan)
@@ -752,9 +733,6 @@ def write_h5_group(h5_file, key, flow_data, rr_interval, resolution, spatial_ord
         group.create_dataset("VENC", data=np.array(venc_values, dtype=np.float32))
     else:
         group.create_dataset("VENC", data=np.array([np.nan, np.nan, np.nan], dtype=np.float32))
-
-    create_string_dataset(group, "SpatialOrder", spatial_order if spatial_order is not None else ["", "", ""])
-    create_string_dataset(group, "VENCOrder", venc_order if venc_order is not None else ["", "", ""])
 
 
 def convert_dicom_to_h5(dicom_path, data_save_path):
@@ -772,15 +750,14 @@ def convert_dicom_to_h5(dicom_path, data_save_path):
             if not flow_dcm_files[key]:
                 continue
             print(f"UID: {key}, File Nums: {len(flow_dcm_files[key])}")
-            flow_data, rr_interval, resolution, spatial_order, venc_order, venc_values = get_flow_data(
+            flow_data, rr_interval, resolution, venc_values = get_flow_data(
                 flow_dcm_files[key],
                 manuf,
                 group_dcms[key],
             )
             print(
                 f"UID: {key}, Data Shape: {flow_data.shape}, RR: {rr_interval}, "
-                f"Resolution: {resolution}, VENC: {venc_values}, "
-                f"SpatialOrder: {spatial_order}, VENCOrder: {venc_order}"
+                f"Resolution: {resolution}, VENC: {venc_values}"
             )
             if flow_data.size > 0:
                 write_h5_group(
@@ -789,8 +766,6 @@ def convert_dicom_to_h5(dicom_path, data_save_path):
                     flow_data,
                     rr_interval,
                     resolution,
-                    spatial_order,
-                    venc_order,
                     venc_values,
                 )
 
