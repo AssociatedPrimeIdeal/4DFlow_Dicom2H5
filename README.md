@@ -38,4 +38,26 @@ V represents the velocity encoding dimension.
 
 Different sequences will be stored in the HDF5 file using distinct UIDs as keys.
 
+Each sequence group is the native contract consumed by AutoFlow and H52Dicom:
+
+```text
+mag          XYZT (magnitude)
+flow         XYZT3 (velocity channels, cm/s)
+RR           cardiac interval in ms
+Resolution   three voxel sizes in mm
+VENC         three velocity-encoding values in cm/s
+VENCOrder    three directed labels such as RL, PA, FH
+SpatialOrder three directed spatial-axis labels derived from ImageOrientationPatient
+Origin       DICOM patient-LPS origin
+patient/     PatientName, PatientID, age, sex, height, and weight
+scanner/     Institution, address, station, manufacturer, model, and device details
+acquisition/ Modality, body part, study/series description, and protocol
+```
+
+`VENCOrder` is parsed directly from DICOM velocity metadata (including vendor
+private fields). `SpatialOrder` follows the source array axes and is inferred
+from DICOM orientation and slice positions. Geometry and standard patient,
+institution, scanner, and acquisition fields are retained in each sequence
+group for downstream conversion and audit.
+
 This script currently supports the majority of 4D flow DICOM formats from Siemens, Philips, GE, and UIH.
