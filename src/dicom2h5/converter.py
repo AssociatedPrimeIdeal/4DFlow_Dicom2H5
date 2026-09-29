@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 # DICOM conversion is memory-heavy. Keep process pools bounded instead of
 # letting ProcessPoolExecutor create one worker per host CPU core.
-MAX_WORKERS = max(1, min(32, int(os.environ.get("DICOM2H5_MAX_WORKERS", "32"))))
+MAX_WORKERS = max(1, min(8, int(os.environ.get("DICOM2H5_MAX_WORKERS", "8"))))
 
 
 def _pool_workers(total):
@@ -430,14 +430,14 @@ UIH_DIRECTION_TO_AXIS = {
 }
 
 
-def parse_uih_flowq_label(value):
+def parse_uih_flowq_label(value, *, px_py_pz_series=False):
     """Read UIH FlowQ's signed direction and VENC from its private label.
 
-    UIH's FlowQ labels use ``inplane_ap`` for the positive posterior phase
-    direction in this export family. Normalize that spelling to ``PA`` so the
-    native H5 polarity agrees with exports that write ``inplane_PA`` directly.
-    This helper is only used by the modern FlowQ private-label path; legacy
-    UIH PX/PY/PZ and RO/PE/SS fallbacks are unchanged.
+    The uMR 790-style ``Px/Py/Pz`` export writes ``inplane_AP`` for the
+    in-plane polarity that the H5/CVI convention represents as ``PA``.  Apply
+    that polarity override only when the caller has identified the
+    ``Px/Py/Pz`` series.  Other UIH FlowQ exports and legacy RO/PE/SS paths
+    keep the direction written in the private label.
     """
     if isinstance(value, bytes):
         value = value.decode(errors="replace")
@@ -446,12 +446,15 @@ def parse_uih_flowq_label(value):
     if match is None:
         return None
     raw_direction = match.group("direction").upper()
-    direction = "PA" if raw_direction == "AP" else raw_direction
+    direction = "PA" if px_py_pz_series and raw_direction == "AP" else raw_direction
     direction_text = raw_direction if raw_direction == direction else f"{raw_direction}->{direction}"
+    direction_source = f"UIH FlowQ private direction: {match.group('mode').lower()}_{direction_text}"
+    if px_py_pz_series and raw_direction == "AP":
+        direction_source += " (Px/Py/Pz QC polarity override)"
     return {
         "axis": UIH_DIRECTION_TO_AXIS[direction],
         "direction_label": direction,
-        "direction_source": f"UIH FlowQ private direction: {match.group('mode').lower()}_{direction_text}",
+        "direction_source": direction_source,
         "venc": float(match.group("venc")),
     }
 
@@ -520,7 +523,34 @@ def siemens_velocity_direction(ds, orientation, venc_direction, slope, intercept
     elif legacy_label:
         label = legacy_label
     elif legacy_through:
-        label = direction_label_from_vector(venc_direction)
+        # XA exports use the old ``(0021,1029)``/``(0021,1077)`` labels.  In
+        # the Vida export represented by ``wang_li_feng_a006012235`` the
+        # DICOM velocity vector is anti-parallel to the image slice normal,
+        # while the private ``v...through`` label denotes that normal.  Use
+        # the IOP normal when the vector is actually the through-plane vector;
+        # retain the vector fallback for legacy files whose vector is not
+        # collinear with the image normal.
+        if orientation is not None and np.asarray(orientation).size >= 6:
+            iop = np.asarray(orientation, dtype=np.float64).reshape(-1)[:6]
+            slice_normal = np.cross(iop[:3], iop[3:6])
+            vector = np.asarray(venc_direction, dtype=np.float64).reshape(-1)
+            if vector.size >= 3:
+                normal_norm = np.linalg.norm(slice_normal)
+                vector_norm = np.linalg.norm(vector[:3])
+                if normal_norm > 0 and vector_norm > 0:
+                    collinear = abs(float(np.dot(slice_normal, vector[:3]))) / (
+                        normal_norm * vector_norm
+                    )
+                    if collinear >= 0.95:
+                        label = _dominant_patient_direction(slice_normal)
+                    else:
+                        label = direction_label_from_vector(vector)
+                else:
+                    label = direction_label_from_vector(vector)
+            else:
+                label = direction_label_from_vector(venc_direction)
+        else:
+            label = direction_label_from_vector(venc_direction)
     else:
         label = direction_label_from_vector(venc_direction)
 
@@ -914,7 +944,13 @@ def check_flow_file_core(file, manuf):
         venc = None
         direction_label = None
         direction_source = None
-        flowq = parse_uih_flowq_label(private_flow_label)
+        px_py_pz_series = bool(
+            re.search(r"(?:^|[_\-\s])p[xyz](?:$|[_\-\s])", str(series_description), re.IGNORECASE)
+        )
+        flowq = parse_uih_flowq_label(
+            private_flow_label,
+            px_py_pz_series=px_py_pz_series,
+        )
         if flowq is not None:
             axis = flowq["axis"]
             direction_label = flowq["direction_label"]
