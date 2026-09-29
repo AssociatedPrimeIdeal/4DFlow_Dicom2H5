@@ -431,18 +431,27 @@ UIH_DIRECTION_TO_AXIS = {
 
 
 def parse_uih_flowq_label(value):
-    """Read UIH FlowQ's signed direction and VENC from its private label."""
+    """Read UIH FlowQ's signed direction and VENC from its private label.
+
+    UIH's FlowQ labels use ``inplane_ap`` for the positive posterior phase
+    direction in this export family. Normalize that spelling to ``PA`` so the
+    native H5 polarity agrees with exports that write ``inplane_PA`` directly.
+    This helper is only used by the modern FlowQ private-label path; legacy
+    UIH PX/PY/PZ and RO/PE/SS fallbacks are unchanged.
+    """
     if isinstance(value, bytes):
         value = value.decode(errors="replace")
     text = str(value or "").strip()
     match = UIH_FLOWQ_RE.search(text)
     if match is None:
         return None
-    direction = match.group("direction").upper()
+    raw_direction = match.group("direction").upper()
+    direction = "PA" if raw_direction == "AP" else raw_direction
+    direction_text = raw_direction if raw_direction == direction else f"{raw_direction}->{direction}"
     return {
         "axis": UIH_DIRECTION_TO_AXIS[direction],
         "direction_label": direction,
-        "direction_source": f"UIH FlowQ private direction: {match.group('mode').lower()}_{direction}",
+        "direction_source": f"UIH FlowQ private direction: {match.group('mode').lower()}_{direction_text}",
         "venc": float(match.group("venc")),
     }
 
