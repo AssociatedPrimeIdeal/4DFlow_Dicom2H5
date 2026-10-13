@@ -561,8 +561,25 @@ def siemens_velocity_direction(ds, orientation, venc_direction, slope, intercept
     return label
 
 
-def siemens_single_frame_velocity_direction(sequence_name, orientation, slope, intercept):
-    """Resolve Siemens single-frame phase polarity from its sequence name."""
+def siemens_single_frame_velocity_direction(sequence_name, orientation, slope, intercept, ds=None):
+    """Resolve Siemens single-frame polarity from private tags or legacy names."""
+    if ds is not None and (0x0021, 0x1129) in ds:
+        value = ds[(0x0021, 0x1129)].value
+        value = value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+        if re.search(
+            r"v\d+[_-](?:inplane[_-](?:rl|lr|ap|pa|hf|fh)|through)",
+            value,
+            re.IGNORECASE,
+        ):
+            # Share the established Siemens private-tag encoding convention
+            # with enhanced exports, including through-plane polarity. Keep
+            # the legacy single-frame normal rule only for the fallback below.
+            normal = None
+            if orientation is not None and np.asarray(orientation).size >= 6:
+                iop = np.asarray(orientation, dtype=np.float64).reshape(-1)[:6]
+                normal = np.cross(iop[:3], iop[3:6])
+            return siemens_velocity_direction(ds, orientation, normal, slope, intercept)
+
     value = str(sequence_name or "")
     match = re.search(r"v\d+(?:[_-]?(?:inplane[_-])?(?P<direction>rl|lr|ap|pa|hf|fh)|[_-]?(?P<through>in|through))(?:$|[_-])", value, re.IGNORECASE)
     if match is None:
@@ -835,11 +852,11 @@ def check_flow_file_core(file, manuf):
             venc = extract_siemens_venc(sequence_name)
             axis = infer_siemens_axis(sequence_name, orientation)
             direction_label = siemens_single_frame_velocity_direction(
-                sequence_name, orientation, slope, intercept
+                sequence_name, orientation, slope, intercept, ds=ds
             )
             if direction_label:
                 axis = {"RL": 1, "LR": 1, "AP": 2, "PA": 2, "HF": 3, "FH": 3}[direction_label]
-                direction_source = "Siemens single-frame private sequence direction + PixelValueTransformation"
+                direction_source = "Siemens single-frame private encoding/sequence direction + IOP + PixelValueTransformation"
         data = scale_phase_data(data_array, slope, intercept, venc) if axis else (data_array * slope + intercept)
         return make_record(
             axis, venc, data, rr_interval, resolution, orientation,
