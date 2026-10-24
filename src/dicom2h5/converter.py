@@ -632,9 +632,34 @@ def make_record(
     }
 
 
-def check_file_core(file, manuf):
+def check_file_core(file, manuf, *, _inspection=None):
     try:
         ds = pydicom.dcmread(file)
+        if _inspection is not None:
+            # Match stop_before_pixels semantics even for an out-of-order file.
+            # Keep metadata from before decoding, and fall back to the original
+            # header readers whenever raw offsets cannot prove it preceded pixels.
+            try:
+                raw = getattr(ds, "_dict", {})
+                offsets = [getattr(raw.get(tag), "value_tell", None)
+                           for tag in (0x7FE00008, 0x7FE00009, 0x7FE00010) if tag in raw]
+                if not offsets or any(value is None for value in offsets):
+                    raise ValueError("Pixel offset unavailable")
+                pixel_offset = min(offsets)
+                fields = (("SOPInstanceUID", 0x00080018), ("ImageType", 0x00080008),
+                          ("Rows", 0x00280010), ("Columns", 0x00280011),
+                          ("NumberOfFrames", 0x00280008))
+                for keyword, tag in fields:
+                    if tag in raw:
+                        position = getattr(raw[tag], "value_tell", None)
+                        if position is None or position >= pixel_offset:
+                            raise ValueError("Metadata does not precede pixels")
+                        _inspection[keyword] = getattr(ds, keyword)
+            except Exception:
+                # Metadata reuse cannot change pixel validation or stage-specific
+                # acceptance/fallback on malformed or differently decoded headers.
+                _inspection.clear()
+                _inspection["_read_failed"] = True
         data_array = ds.pixel_array
         if len(data_array.shape) == 3:
             group_dcm = 1
@@ -737,17 +762,37 @@ def check_file_core(file, manuf):
     return None
 
 
-def get_filtered_flow_dcm_files(dcm_files, manuf):
+def _inspect_flow_file(file, manuf):
+    inspection = {}
+    result = check_file_core(file, manuf, _inspection=inspection)
+    return result, None if inspection.pop("_read_failed", False) else inspection
+
+
+def _inspection_header(filename, inspection_cache, *, force=False):
+    """Reuse this conversion's successful inspection; never persist a cache."""
+    inspection = inspection_cache.get(filename) if inspection_cache is not None else None
+    if inspection is None:
+        return pydicom.dcmread(filename, stop_before_pixels=True, force=force)
+    header = pydicom.dataset.Dataset()
+    for keyword, value in inspection.items():
+        setattr(header, keyword, value)
+    return header
+
+
+def get_filtered_flow_dcm_files(dcm_files, manuf, *, inspection_cache=None):
+    if inspection_cache is None:
+        inspection_cache = {}
     grouped_files = {}
     group_dcms = {}
 
     with ProcessPoolExecutor(max_workers=_pool_workers(len(dcm_files))) as executor:
-        results = list(tqdm(executor.map(check_file_core, dcm_files, [manuf] * len(dcm_files)), total=len(dcm_files)))
+        results = list(tqdm(executor.map(_inspect_flow_file, dcm_files, [manuf] * len(dcm_files)), total=len(dcm_files)))
 
-    for result in results:
+    for result, inspection in results:
         if result is None:
             continue
         file, frame_of_reference_uid, group_dcm = result
+        inspection_cache[file] = inspection
         grouped_files.setdefault(frame_of_reference_uid, []).append(file)
         group_dcms.setdefault(frame_of_reference_uid, []).append(group_dcm)
 
@@ -756,7 +801,7 @@ def get_filtered_flow_dcm_files(dcm_files, manuf):
             has_t1 = False
             for file in grouped_files[key]:
                 try:
-                    ds_tmp = pydicom.dcmread(file, stop_before_pixels=True)
+                    ds_tmp = _inspection_header(file, inspection_cache)
                     if hasattr(ds_tmp, "ImageType") and len(ds_tmp.ImageType) > 2 and ds_tmp.ImageType[2] == "T1":
                         has_t1 = True
                         break
@@ -768,7 +813,7 @@ def get_filtered_flow_dcm_files(dcm_files, manuf):
             filtered_files = []
             for file in grouped_files[key]:
                 try:
-                    ds_tmp = pydicom.dcmread(file, stop_before_pixels=True)
+                    ds_tmp = _inspection_header(file, inspection_cache)
                     if hasattr(ds_tmp, "ImageType") and len(ds_tmp.ImageType) > 2 and ds_tmp.ImageType[2] == "ANGIO":
                         continue
                 except Exception:
@@ -785,7 +830,7 @@ def get_filtered_flow_dcm_files(dcm_files, manuf):
             by_shape = {}
             for filename in files:
                 try:
-                    header = pydicom.dcmread(filename, stop_before_pixels=True, force=True)
+                    header = _inspection_header(filename, inspection_cache, force=True)
                     shape = (
                         int(getattr(header, "Rows")),
                         int(getattr(header, "Columns")),
@@ -811,14 +856,14 @@ def get_filtered_flow_dcm_files(dcm_files, manuf):
     return grouped_files, group_dcms
 
 
-def deduplicate_flow_files(flow_dcm_files):
+def deduplicate_flow_files(flow_dcm_files, *, inspection_cache=None):
     deduplicated = {}
     for key, files in flow_dcm_files.items():
         unique_files = []
         seen_uids = set()
         for file in files:
             try:
-                ds = pydicom.dcmread(file, stop_before_pixels=True)
+                ds = _inspection_header(file, inspection_cache)
                 sop_instance_uid = getattr(ds, "SOPInstanceUID", file)
             except Exception:
                 sop_instance_uid = file
@@ -1343,8 +1388,15 @@ def convert_dicom_to_h5(dicom_path, data_save_path, *, dicom_files=None, case_id
     if not manuf:
         raise ValueError("Could not determine manufacturer from DICOM files.")
 
-    flow_dcm_files, group_dcms = get_filtered_flow_dcm_files(dcm_files, manuf)
-    flow_dcm_files = deduplicate_flow_files(flow_dcm_files)
+    # Scope metadata reuse to this invocation so a subsequent conversion
+    # always inspects the current source files and repeats pixel validation.
+    inspection_cache = {}
+    flow_dcm_files, group_dcms = get_filtered_flow_dcm_files(
+        dcm_files, manuf, inspection_cache=inspection_cache
+    )
+    flow_dcm_files = deduplicate_flow_files(
+        flow_dcm_files, inspection_cache=inspection_cache
+    )
     print(f"Found {len(flow_dcm_files)} different sequence groups from {manuf}")
 
     with h5py.File(data_save_path, "w") as h5_file:
