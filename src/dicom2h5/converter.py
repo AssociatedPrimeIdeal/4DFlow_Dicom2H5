@@ -501,6 +501,29 @@ def direction_label_from_vector(value):
     return (positive if vector[axis] >= 0 else negative)[axis]
 
 
+def philips_single_frame_velocity_direction(ds):
+    """Read classic Philips encoding vectors in the native H5 axis convention."""
+    candidates = [
+        (element.value, "Philips classic (0018,9090) VelocityEncodingDirection")
+        for element in ds.iterall()
+        if element.tag == (0x0018, 0x9090)
+    ]
+    if (0x2001, 0x101A) in ds:
+        candidates.append((ds[(0x2001, 0x101A)].value, "Philips classic private (2001,101A) PC Velocity"))
+    for value, source in candidates:
+        try:
+            vector = np.asarray(value, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            continue
+        if vector.size != 3 or not np.all(np.isfinite(vector)) or not np.any(vector):
+            continue
+        axis = int(np.argmax(np.abs(vector))) + 1
+        # Use the same signed labels as SpatialOrder (+Y=AP). Do not alter
+        # the shared vector mapper used by other vendors/multiframe paths.
+        return axis, _dominant_patient_direction(vector), source
+    return 0, None, None
+
+
 def siemens_velocity_direction(ds, orientation, venc_direction, slope, intercept):
     """Return the anatomical direction of Siemens phase values after scaling."""
     modern_label = None
@@ -902,16 +925,7 @@ def check_flow_file_core(file, manuf):
         direction_label = None
         direction_source = None
         if image_type[-2] == "P":
-            try:
-                pc_velocity = ds[(0x2001, 0x101A)].value
-            except (KeyError, TypeError, AttributeError):
-                pc_velocity = None
-            if pc_velocity is not None:
-                pc_velocity = np.asarray(pc_velocity, dtype=np.float32).reshape(-1)
-                if pc_velocity.size >= 3 and np.any(np.abs(pc_velocity[:3]) > 0):
-                    axis = int(np.argmax(np.abs(pc_velocity[:3]))) + 1
-                    direction_label = direction_label_from_vector(pc_velocity[:3])
-                    direction_source = "Philips private (2001,101A) PC Velocity"
+            axis, direction_label, direction_source = philips_single_frame_velocity_direction(ds)
             if axis == 0:
                 protocol_match = re.search(
                     r"(?:^|[^A-Z])(RL|LR|AP|PA|HF|FH)(?:$|[^A-Z])",
