@@ -157,9 +157,10 @@ def _uses_philips_classic_flow_slice_number(header):
     """Match classic flow records stacked by Philips private Slice Number MR."""
     if "philips" not in str(getattr(header, "Manufacturer", "")).lower():
         return False
-    protocol = str(getattr(header, "ProtocolName", "")).lower()
-    if "delrec" not in protocol and "4d_qflow" not in protocol:
-        return False
+    # This helper receives already-selected flow records. The classic Philips
+    # pixel reader stacks both magnitude and phase by (2001,100A), including
+    # original WIP magnitude images whose protocol has no DelRec suffix.
+    # Use the same available slice key instead of gating geometry on a name.
     try:
         return int(getattr(header, "NumberOfFrames", 1)) == 1 and np.isfinite(
             float(header[(0x2001, 0x100A)].value)
