@@ -153,10 +153,30 @@ def _dominant_patient_direction(vector):
     return (positive if vector[axis] >= 0 else negative)[axis]
 
 
+def _uses_philips_classic_flow_slice_number(header):
+    """Match classic flow records stacked by Philips private Slice Number MR."""
+    if "philips" not in str(getattr(header, "Manufacturer", "")).lower():
+        return False
+    protocol = str(getattr(header, "ProtocolName", "")).lower()
+    if "delrec" not in protocol and "4d_qflow" not in protocol:
+        return False
+    try:
+        return int(getattr(header, "NumberOfFrames", 1)) == 1 and np.isfinite(
+            float(header[(0x2001, 0x100A)].value)
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def derive_spatial_metadata(files):
     """Derive stored-array spatial labels and geometry from DICOM headers."""
     headers = []
-    for filename in files[: min(len(files), 256)]:
+    for index, filename in enumerate(files):
+        # Philips classic flow slices follow private (2001,100A), not SliceLocation.
+        # Read the whole selected group to find its actual first stored slice.
+        # All other sequence branches retain the historical sampling behavior.
+        if index >= 256 and not (headers and _uses_philips_classic_flow_slice_number(headers[0])):
+            break
         try:
             headers.append(pydicom.dcmread(filename, stop_before_pixels=True, force=True))
         except Exception:
@@ -196,6 +216,7 @@ def derive_spatial_metadata(files):
             _dominant_patient_direction(slice_normal),
         )
 
+    use_philips_slice_number = all(_uses_philips_classic_flow_slice_number(h) for h in headers)
     positioned = []
     for header in headers:
         position = getattr(header, "ImagePositionPatient", None)
@@ -203,7 +224,7 @@ def derive_spatial_metadata(files):
             continue
         point = np.asarray(position, dtype=np.float64).reshape(3)
         try:
-            location = float(getattr(header, "SliceLocation"))
+            location = float(header[(0x2001, 0x100A)].value) if use_philips_slice_number else float(getattr(header, "SliceLocation"))
             if not np.isfinite(location):
                 raise ValueError
         except (AttributeError, TypeError, ValueError):
@@ -374,9 +395,15 @@ def get_siemens_acquisition_id(ds):
 
 
 def get_referenced_series_uid(ds, series_index):
+    referenced_series = ds.ReferencedImageEvidenceSequence[0].ReferencedSeriesSequence
+    # Some enhanced Siemens exports place multiple referenced SOPs inside
+    # one series. Preserve the preferred reference for multi-series exports,
+    # and use the sole available series when the usual second one is absent.
+    # The existing Siemens acquisition identifier still separates scans.
+    if series_index == 1 and len(referenced_series) == 1:
+        series_index = 0
     return (
-        ds.ReferencedImageEvidenceSequence[0]
-        .ReferencedSeriesSequence[series_index]
+        referenced_series[series_index]
         .ReferencedSOPSequence[0]
         .ReferencedSOPInstanceUID
     )
